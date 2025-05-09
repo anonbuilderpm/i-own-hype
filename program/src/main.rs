@@ -14,6 +14,7 @@ use k256::{
     ecdsa::{Signature, VerifyingKey, RecoveryId},
 };
 use std::collections::HashSet;
+use alloy_primitives::Address;
 
 // Constants for balance range (700k-701k HYPE)
 const MIN_BALANCE: u64 = 70_000_000_000_000; // 700,000 HYPE
@@ -64,36 +65,23 @@ fn hex_to_bytes32(hex: &str) -> [u8; 32] {
     result
 }
 
-// Recovers a public key from a signature and message digest
-fn recover_pubkey_with_digest(message_digest_hex: &str, signature: &str) -> String {
+// Recovers a public key from a signature and message digest, returns uncompressed pubkey bytes (no prefix)
+fn recover_pubkey_with_digest(message_digest_hex: &str, signature: &str) -> Vec<u8> {
     let sig_bytes = hex::decode(&signature[2..]).unwrap();
     let recovery_byte = sig_bytes[64];
     let recovery_id = RecoveryId::try_from((recovery_byte - 27) as u8).unwrap();
     let signature = Signature::try_from(&sig_bytes[..64]).unwrap();
     let message_digest = hex_to_bytes32(message_digest_hex);
     let recovered_key = VerifyingKey::recover_from_prehash(&message_digest, &signature, recovery_id).unwrap();
-    hex::encode(recovered_key.to_encoded_point(false).as_bytes())
-}
-
-// Convert a public key to an Ethereum address
-fn pubkey_to_address(pubkey_hex: &str) -> String {
-    let pubkey_bytes = hex::decode(pubkey_hex).unwrap();
-    let bytes_to_hash = if pubkey_bytes.len() > 0 && pubkey_bytes[0] == 4 {
-        &pubkey_bytes[1..]
-    } else {
-        &pubkey_bytes
-    };
-    let mut hasher = Keccak256::new();
-    hasher.update(bytes_to_hash);
-    let hash = hasher.finalize();
-    format!("0x{}", hex::encode(&hash[hash.len() - 20..]))
+    // Return the uncompressed public key bytes (skip the 0x04 prefix for Alloy)
+    recovered_key.to_encoded_point(false).as_bytes()[1..].to_vec()
 }
 
 // Hash a leaf (address, balance) pair using keccak256
-fn hash_leaf(address: &str, balance: u64) -> [u8; 32] {
-    let address = address.to_lowercase();
+fn hash_leaf(address: &Address, balance: u64) -> [u8; 32] {
+    let address_str = format!("0x{:x}", address);
     let balance = balance.to_string();
-    let leaf_str = address + ":" + &balance;
+    let leaf_str = address_str.to_lowercase() + ":" + &balance;
     let mut hasher = Keccak256::new();
     hasher.update(leaf_str.as_bytes());
     let result = hasher.finalize();
@@ -146,14 +134,11 @@ pub fn main() {
     
     for signed_message in private_inputs.signed_messages.iter() {
         // Step 1: Recover the Ethereum address from the signature
-        let pubkey = recover_pubkey_with_digest(&public_inputs.message_digest, &signed_message.signature);
-        let recovered_address = pubkey_to_address(&pubkey);
-        
-        // Normalize address to lowercase for consistent comparison
-        let normalized_address = recovered_address.to_lowercase();
+        let pubkey_bytes = recover_pubkey_with_digest(&public_inputs.message_digest, &signed_message.signature);
+        let recovered_address = Address::from_raw_public_key(&pubkey_bytes);
         
         // Skip if we've already processed this address
-        if seen_addresses.contains(&normalized_address) {
+        if seen_addresses.contains(&recovered_address) {
             continue;
         }
         
@@ -167,7 +152,7 @@ pub fn main() {
         if computed_root == expected_merkle_root {
             // Step 6: Add the balance to the total and mark this address as seen
             total_balance += signed_message.balance;
-            seen_addresses.insert(normalized_address);
+            seen_addresses.insert(recovered_address);
         }
     }
     
